@@ -71,7 +71,7 @@ export function PushNotificationManager() {
         }
       } catch (error) {
         console.warn("Failed to load subscription:", error);
-        setError("Service worker not ready. Ensure you're using localhost for PWA features.");
+        setError("Service worker not ready. Ensure HTTPS is enabled and the service worker is registered.");
       }
     };
 
