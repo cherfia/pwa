@@ -14,14 +14,31 @@ type SerializedSubscription = {
 
 const vapidPublicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
 
+function arraysEqual(a: ArrayLike<number>, b: ArrayLike<number>): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
 function urlBase64ToUint8Array(base64String: string) {
-  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
-  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  // Trim whitespace and newlines that might be in env vars
+  const cleaned = base64String.trim().replace(/\s/g, "");
+  const padding = "=".repeat((4 - (cleaned.length % 4)) % 4);
+  const base64 = (cleaned + padding).replace(/-/g, "+").replace(/_/g, "/");
   const rawData = typeof window !== "undefined" ? window.atob(base64) : "";
   const outputArray = new Uint8Array(rawData.length);
   for (let i = 0; i < rawData.length; ++i) {
     outputArray[i] = rawData.charCodeAt(i);
   }
+  
+  // Chrome/FCM requires exactly 65 bytes for VAPID public key
+  // If we get 64 bytes, Chrome will reject it
+  if (outputArray.length !== 65 && outputArray.length !== 64) {
+    console.warn(`VAPID key length is ${outputArray.length}, expected 65 bytes for Chrome compatibility`);
+  }
+  
   return outputArray;
 }
 
@@ -38,10 +55,6 @@ export function PushNotificationManager() {
     if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
       setIsSupported(false);
       setError("Push not supported in this browser.");
-      return;
-    }
-    if (!vapidPublicKey) {
-      setError("Missing NEXT_PUBLIC_VAPID_PUBLIC_KEY.");
       return;
     }
 
@@ -70,12 +83,6 @@ export function PushNotificationManager() {
     setStatus(null);
     setIsLoading(true);
 
-    if (!vapidPublicKey) {
-      setError("Missing NEXT_PUBLIC_VAPID_PUBLIC_KEY. Add it to your .env.local file and restart the dev server.");
-      setIsLoading(false);
-      return;
-    }
-
     try {
       const permissionResult = await Notification.requestPermission();
       setPermission(permissionResult);
@@ -86,41 +93,46 @@ export function PushNotificationManager() {
         return;
       }
 
-      let registration;
-      try {
-        registration = await navigator.serviceWorker.ready;
-      } catch (swError) {
-        setError("Service worker not ready. Use localhost instead of IP address for PWA features.");
-        setIsLoading(false);
-        return;
+      const registration = await navigator.serviceWorker.ready;
+      
+      if (!vapidPublicKey) {
+        throw new Error("VAPID public key is not available");
       }
-
-      const sub = await registration.pushManager.subscribe({
+      
+      // Chrome may have a cached failed subscription - try to get existing first
+      let existingSub = await registration.pushManager.getSubscription();
+      if (existingSub) {
+        // Check if existing subscription uses the same key
+        const existingKey = existingSub.options?.applicationServerKey;
+        const newKey = urlBase64ToUint8Array(vapidPublicKey);
+        
+        // If keys don't match or subscription is invalid, unsubscribe first
+        // Chrome caches failed subscriptions and needs them cleared
+        if (existingKey) {
+          const existingKeyArray = existingKey instanceof ArrayBuffer 
+            ? new Uint8Array(existingKey) 
+            : new Uint8Array(existingKey);
+          if (!arraysEqual(existingKeyArray, newKey)) {
+            await existingSub.unsubscribe();
+            existingSub = null;
+          }
+        } else {
+          // No key in existing sub, unsubscribe to clear Chrome's cache
+          await existingSub.unsubscribe();
+          existingSub = null;
+        }
+      }
+      
+      const applicationServerKey = urlBase64ToUint8Array(vapidPublicKey);
+      const sub = existingSub || await registration.pushManager.subscribe({
         userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(vapidPublicKey),
+        applicationServerKey,
       });
 
       const serialized = JSON.parse(JSON.stringify(sub)) as SerializedSubscription;
       setSubscription(serialized);
-      
-      try {
-        // Add timeout to prevent hanging
-        const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error("Request timed out. Check server logs and ensure VAPID keys are set.")), 10000)
-        );
-        
-        await Promise.race([
-          subscribeUser(serialized),
-          timeoutPromise,
-        ]);
-        
-        setStatus("✅ Subscribed to push notifications! You can now send test notifications.");
-      } catch (serverError) {
-        const errorMessage = serverError instanceof Error ? serverError.message : "Unknown error";
-        setError(`Failed to save subscription: ${errorMessage}`);
-        setSubscription(null);
-        console.error("Server error details:", serverError);
-      }
+      await subscribeUser(serialized);
+      setStatus("✅ Subscribed to push notifications! You can now send test notifications.");
     } catch (error) {
       const err = error as Error;
       setError(`Subscription failed: ${err.message || "Unknown error"}`);
@@ -252,12 +264,6 @@ export function PushNotificationManager() {
       {status && (
         <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/60 dark:text-emerald-100">
           {status}
-        </div>
-      )}
-
-      {!vapidPublicKey && (
-        <div className="text-sm text-amber-600 dark:text-amber-400">
-          Set NEXT_PUBLIC_VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY to enable push.
         </div>
       )}
     </div>

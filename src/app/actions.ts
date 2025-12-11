@@ -1,4 +1,4 @@
-'use server';
+"use server";
 
 import webPush from "web-push";
 
@@ -13,36 +13,27 @@ type SerializedSubscription = {
 
 const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
-const VAPID_CONTACT = process.env.VAPID_CONTACT_EMAIL ?? "mailto:admin@pwa-demo.local";
+const VAPID_CONTACT =
+  process.env.VAPID_CONTACT_EMAIL ?? "mailto:admin@pwa-demo.local";
 
 let subscriptionStore: SerializedSubscription | null = null;
 let vapidConfigured = false;
 
 function ensureVapid() {
   if (vapidConfigured) return;
-  if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
-    const missing = [];
-    if (!VAPID_PUBLIC_KEY) missing.push("NEXT_PUBLIC_VAPID_PUBLIC_KEY");
-    if (!VAPID_PRIVATE_KEY) missing.push("VAPID_PRIVATE_KEY");
-    throw new Error(`Missing VAPID keys in production: ${missing.join(", ")}. Please set these environment variables.`);
-  }
-  try {
-    webPush.setVapidDetails(VAPID_CONTACT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
-    vapidConfigured = true;
-  } catch (error) {
-    throw new Error(`Failed to configure VAPID: ${error instanceof Error ? error.message : "Unknown error"}`);
-  }
+  console.log("Server VAPID Public Key length:", VAPID_PUBLIC_KEY?.length || 0);
+  console.log(
+    "Server VAPID Public Key (first 20 chars):",
+    VAPID_PUBLIC_KEY?.substring(0, 20) || "missing"
+  );
+  webPush.setVapidDetails(VAPID_CONTACT, VAPID_PUBLIC_KEY!, VAPID_PRIVATE_KEY!);
+  vapidConfigured = true;
 }
 
 export async function subscribeUser(subscription: SerializedSubscription) {
-  try {
-    ensureVapid();
-    subscriptionStore = subscription;
-    return { success: true };
-  } catch (error) {
-    console.error("subscribeUser error:", error);
-    throw error;
-  }
+  ensureVapid();
+  subscriptionStore = subscription;
+  return { success: true };
 }
 
 export async function unsubscribeUser() {
@@ -68,4 +59,3 @@ export async function sendNotification(message: string) {
 
   return { success: true };
 }
-
