@@ -104,11 +104,22 @@ export function PushNotificationManager() {
       setSubscription(serialized);
       
       try {
-        await subscribeUser(serialized);
+        // Add timeout to prevent hanging
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error("Request timed out. Check server logs and ensure VAPID keys are set.")), 10000)
+        );
+        
+        await Promise.race([
+          subscribeUser(serialized),
+          timeoutPromise,
+        ]);
+        
         setStatus("✅ Subscribed to push notifications! You can now send test notifications.");
       } catch (serverError) {
-        setError(`Failed to save subscription: ${serverError instanceof Error ? serverError.message : "Unknown error"}`);
+        const errorMessage = serverError instanceof Error ? serverError.message : "Unknown error";
+        setError(`Failed to save subscription: ${errorMessage}`);
         setSubscription(null);
+        console.error("Server error details:", serverError);
       }
     } catch (error) {
       const err = error as Error;
