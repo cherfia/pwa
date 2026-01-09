@@ -13,6 +13,7 @@
     "@upstash/qstash": "^2.8.4",
     "next": "16.0.10",
     "react": "19.2.1",
+    "react-device-detect": "^2.2.3",
     "react-dom": "19.2.1",
     "web-push": "^3.6.7"
   },

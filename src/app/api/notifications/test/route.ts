@@ -39,7 +39,12 @@ export async function POST(request: Request) {
       badge: "/android/android-launchericon-72-72.png",
     });
 
-    await webPush.sendNotification(subscription, payload);
+    // iOS Safari requires Urgency header
+    await webPush.sendNotification(subscription, payload, {
+      headers: {
+        Urgency: "normal",
+      },
+    });
 
     return NextResponse.json({
       success: true,

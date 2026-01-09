@@ -7,6 +7,7 @@ import {
   subscribeUser,
   unsubscribeUser,
 } from "@/app/actions";
+import { isIOS } from "react-device-detect";
 
 type SerializedSubscription = {
   endpoint: string;
@@ -218,7 +219,9 @@ export function PushNotificationManager() {
   if (!isSupported) {
     return (
       <div className="rounded-lg border border-zinc-200 bg-white p-4 text-sm text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200">
-        Push not supported in this browser.
+        {isIOS
+          ? 'To enable Web Push on iOS 16.4+ devices, you have to "Add to Home Screen" first (in "Share" icon menu) and then open the app from the home screen.'
+          : 'Push not supported in this browser.'}
       </div>
     );
   }

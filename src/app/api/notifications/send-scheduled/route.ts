@@ -98,7 +98,12 @@ async function handler(request: Request) {
     });
 
     try {
-      await webPush.sendNotification(subscription, payload);
+      // iOS Safari requires Urgency header
+      await webPush.sendNotification(subscription, payload, {
+        headers: {
+          Urgency: "normal",
+        },
+      });
       console.log(`Successfully sent notification ${notificationId}`);
     } catch (pushError) {
       console.error("webPush.sendNotification error:", pushError);
