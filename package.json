@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "process-notifications": "tsx src/scripts/process-notifications.ts"
   },
   "dependencies": {
     "@tcgdex/sdk": "^2.7.1",
@@ -24,6 +25,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.0.8",
     "tailwindcss": "^4",
+    "tsx": "^4.21.0",
     "typescript": "^5"
   }
 }

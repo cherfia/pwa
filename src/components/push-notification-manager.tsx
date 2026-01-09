@@ -1,7 +1,12 @@
 'use client';
 
-import { useEffect, useRef, useState } from "react";
-import { sendNotification, subscribeUser, unsubscribeUser } from "@/app/actions";
+import { useEffect, useState } from "react";
+import {
+  sendNotification,
+  scheduleNotification,
+  subscribeUser,
+  unsubscribeUser,
+} from "@/app/actions";
 
 type SerializedSubscription = {
   endpoint: string;
@@ -49,10 +54,6 @@ export function PushNotificationManager() {
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [scheduledCountdown, setScheduledCountdown] = useState<number | null>(null);
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const remainingRef = useRef<number>(0);
 
   useEffect(() => {
     if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
@@ -79,16 +80,6 @@ export function PushNotificationManager() {
     };
 
     void loadSubscription();
-
-    // Cleanup function for scheduled notifications
-    return () => {
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
-      }
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
-    };
   }, []);
 
   const subscribe = async () => {
@@ -186,77 +177,41 @@ export function PushNotificationManager() {
       return;
     }
     
-    const messageToSend = message.trim();
-    const delayMs = delayMinutes * 60 * 1000;
-    
-    if (delayMs > 0) {
-      // Clear any existing scheduled notifications
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
-      }
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-      }
-
-      // Schedule the notification
-      setStatus(`⏰ Notification scheduled in ${delayMinutes} minute${delayMinutes !== 1 ? 's' : ''}...`);
-      setMessage("");
-      setIsLoading(false);
+    setIsLoading(true);
+    try {
+      const messageToSend = message.trim();
       
-      // Start countdown
-      remainingRef.current = delayMs;
-      setScheduledCountdown(Math.floor(remainingRef.current / 1000));
-      
-      intervalRef.current = setInterval(() => {
-        remainingRef.current -= 1000;
-        if (remainingRef.current > 0) {
-          setScheduledCountdown(Math.floor(remainingRef.current / 1000));
+      if (delayMinutes > 0) {
+        // Schedule the notification on the server
+        const result = await scheduleNotification(
+          messageToSend,
+          delayMinutes,
+          subscription
+        );
+        
+        if ("scheduledFor" in result && result.scheduledFor) {
+          const scheduledDate = new Date(result.scheduledFor);
+          const timeString = scheduledDate.toLocaleTimeString();
+          setMessage("");
+          setStatus(
+            `⏰ Notification scheduled for ${timeString} (in ${delayMinutes} minute${delayMinutes !== 1 ? 's' : ''}). It will be sent even if you close the app.`
+          );
         } else {
-          if (intervalRef.current) {
-            clearInterval(intervalRef.current);
-            intervalRef.current = null;
-          }
-          setScheduledCountdown(null);
+          setMessage("");
+          setStatus("✅ Notification scheduled successfully.");
         }
-      }, 1000);
-      
-      // Schedule the actual send
-      timeoutRef.current = setTimeout(async () => {
-        try {
-          await sendNotification(messageToSend, subscription);
-          setStatus("✅ Scheduled notification sent! Check your notifications.");
-          if (intervalRef.current) {
-            clearInterval(intervalRef.current);
-            intervalRef.current = null;
-          }
-          setScheduledCountdown(null);
-          timeoutRef.current = null;
-        } catch (error) {
-          const err = error as Error;
-          setError(`Failed to send scheduled notification: ${err.message || "Unknown error"}`);
-          console.error("Send notification error:", error);
-          if (intervalRef.current) {
-            clearInterval(intervalRef.current);
-            intervalRef.current = null;
-          }
-          setScheduledCountdown(null);
-          timeoutRef.current = null;
-        }
-      }, delayMs);
-    } else {
-      // Send immediately
-      setIsLoading(true);
-      try {
+      } else {
+        // Send immediately
         await sendNotification(messageToSend, subscription);
         setMessage("");
         setStatus("✅ Notification sent! Check your notifications.");
-      } catch (error) {
-        const err = error as Error;
-        setError(`Failed to send notification: ${err.message || "Unknown error"}`);
-        console.error("Send notification error:", error);
-      } finally {
-        setIsLoading(false);
       }
+    } catch (error) {
+      const err = error as Error;
+      setError(`Failed to ${delayMinutes > 0 ? 'schedule' : 'send'} notification: ${err.message || "Unknown error"}`);
+      console.error("Send notification error:", error);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -340,21 +295,21 @@ export function PushNotificationManager() {
         <button
           className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
           onClick={send}
-          disabled={!subscription || isLoading || !message.trim() || scheduledCountdown !== null}
+          disabled={!subscription || isLoading || !message.trim()}
         >
-          {isLoading ? "Sending..." : delayMinutes > 0 ? "Schedule" : "Send Test"}
+          {isLoading
+            ? delayMinutes > 0
+              ? "Scheduling..."
+              : "Sending..."
+            : delayMinutes > 0
+            ? "Schedule"
+            : "Send Test"}
         </button>
       </div>
 
       {error && (
         <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800 dark:border-rose-900/60 dark:bg-rose-950/60 dark:text-rose-100">
           {error}
-        </div>
-      )}
-
-      {scheduledCountdown !== null && (
-        <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-800 dark:border-blue-900/60 dark:bg-blue-950/60 dark:text-blue-100">
-          ⏰ Notification scheduled. Sending in {Math.floor(scheduledCountdown / 60)}:{(scheduledCountdown % 60).toString().padStart(2, '0')}...
         </div>
       )}
 

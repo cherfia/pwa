@@ -1,6 +1,11 @@
 "use server";
 
 import webPush from "web-push";
+import {
+  addScheduledNotification,
+  type ScheduledNotification,
+} from "@/lib/notification-storage";
+import { randomUUID } from "crypto";
 
 type SerializedSubscription = {
   endpoint: string;
@@ -80,5 +85,47 @@ export async function sendNotification(
     }
 
     throw new Error("Failed to send notification. Please try again.");
+  }
+}
+
+export async function scheduleNotification(
+  message: string,
+  delayMinutes: number,
+  subscription?: SerializedSubscription
+) {
+  try {
+    const sub = subscription || subscriptionStore;
+
+    if (!sub) {
+      throw new Error("No subscription available. Please subscribe first.");
+    }
+
+    if (delayMinutes <= 0) {
+      // Send immediately
+      return await sendNotification(message, sub);
+    }
+
+    const scheduledFor = Date.now() + delayMinutes * 60 * 1000;
+    const scheduledNotification: ScheduledNotification = {
+      id: randomUUID(),
+      message,
+      subscription: sub,
+      scheduledFor,
+      createdAt: Date.now(),
+    };
+
+    await addScheduledNotification(scheduledNotification);
+
+    return {
+      success: true,
+      scheduledFor,
+      id: scheduledNotification.id,
+    };
+  } catch (error) {
+    console.error("Schedule notification error:", error);
+    if (error instanceof Error) {
+      throw error;
+    }
+    throw new Error("Failed to schedule notification. Please try again.");
   }
 }
