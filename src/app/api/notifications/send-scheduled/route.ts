@@ -15,8 +15,6 @@ const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
 const VAPID_CONTACT =
   process.env.VAPID_CONTACT_EMAIL ?? "mailto:admin@pwa-demo.local";
-const QSTASH_CURRENT_SIGNING_KEY = process.env.QSTASH_CURRENT_SIGNING_KEY;
-const QSTASH_NEXT_SIGNING_KEY = process.env.QSTASH_NEXT_SIGNING_KEY;
 
 let vapidConfigured = false;
 
@@ -29,9 +27,17 @@ function ensureVapid() {
 async function handler(request: Request) {
   let notificationId: string | undefined;
   try {
+    console.log("QStash callback received at:", new Date().toISOString());
+
     ensureVapid();
 
     const body = await request.json();
+    console.log("Received body:", {
+      id: body.id,
+      hasMessage: !!body.message,
+      hasSubscription: !!body.subscription,
+    });
+
     const { id, message, subscription } = body as {
       id: string;
       message: string;
@@ -41,6 +47,10 @@ async function handler(request: Request) {
     notificationId = id;
 
     if (!message || !subscription) {
+      console.error("Missing required fields:", {
+        message: !!message,
+        subscription: !!subscription,
+      });
       return NextResponse.json(
         { error: "Missing message or subscription" },
         { status: 400 }
@@ -54,7 +64,11 @@ async function handler(request: Request) {
       badge: "/android/android-launchericon-72-72.png",
     });
 
+    console.log(
+      `Sending push notification for scheduled notification ${notificationId}`
+    );
     await webPush.sendNotification(subscription, payload);
+    console.log(`Successfully sent notification ${notificationId}`);
 
     return NextResponse.json({
       success: true,
@@ -65,12 +79,18 @@ async function handler(request: Request) {
     console.error("Send scheduled notification error:", error);
 
     if (error instanceof Error) {
+      console.error("Error details:", {
+        message: error.message,
+        stack: error.stack,
+      });
+
       // Don't throw for expired subscriptions - QStash will retry otherwise
       if (
         error.message.includes("expired") ||
         error.message.includes("410") ||
         error.message.includes("404")
       ) {
+        console.log(`Subscription expired for notification ${notificationId}`);
         return NextResponse.json(
           { error: "Subscription expired", id: notificationId },
           { status: 200 } // Return 200 so QStash doesn't retry
@@ -85,11 +105,5 @@ async function handler(request: Request) {
   }
 }
 
-// Verify QStash signature if signing keys are provided
-export const POST =
-  QSTASH_CURRENT_SIGNING_KEY || QSTASH_NEXT_SIGNING_KEY
-    ? verifySignatureAppRouter(handler, {
-        currentSigningKey: QSTASH_CURRENT_SIGNING_KEY,
-        nextSigningKey: QSTASH_NEXT_SIGNING_KEY,
-      })
-    : handler;
+// verifySignatureAppRouter automatically loads QSTASH_CURRENT_SIGNING_KEY and QSTASH_NEXT_SIGNING_KEY from env
+export const POST = verifySignatureAppRouter(handler);

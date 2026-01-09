@@ -122,15 +122,29 @@ export async function scheduleNotification(
     const scheduledFor = Date.now() + delayMinutes * 60 * 1000;
 
     // Get the base URL for the callback
+    // QStash requires a publicly accessible URL
     const baseUrl =
       process.env.NEXT_PUBLIC_BASE_URL ||
-      (process.env.VERCEL_URL
-        ? `https://${process.env.VERCEL_URL}`
-        : "http://localhost:3000");
+      (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null);
+
+    if (!baseUrl || baseUrl.includes("localhost")) {
+      throw new Error(
+        "QStash requires a publicly accessible URL. Set NEXT_PUBLIC_BASE_URL or deploy to Vercel."
+      );
+    }
+
+    const callbackUrl = `${baseUrl}/api/notifications/send-scheduled`;
+
+    console.log(`Scheduling notification with QStash:`, {
+      notificationId,
+      delayMinutes,
+      callbackUrl,
+      scheduledFor: new Date(scheduledFor).toISOString(),
+    });
 
     // Schedule the notification with QStash
-    await qstashClient.publishJSON({
-      url: `${baseUrl}/api/notifications/send-scheduled`,
+    const result = await qstashClient.publishJSON({
+      url: callbackUrl,
       body: {
         id: notificationId,
         message,
@@ -139,10 +153,16 @@ export async function scheduleNotification(
       delay: delayMinutes * 60, // Delay in seconds
     });
 
+    console.log(`QStash message scheduled:`, {
+      messageId: result.messageId,
+      notificationId,
+    });
+
     return {
       success: true,
       scheduledFor,
       id: notificationId,
+      messageId: result.messageId,
     };
   } catch (error) {
     console.error("Schedule notification error:", error);

@@ -69,7 +69,7 @@ This app supports scheduling push notifications that will be sent even if the ap
 
 ### Local Development
 
-For local development, you can use QStash's webhook forwarding or test with a public URL using a tool like [ngrok](https://ngrok.com/):
+For local development, QStash requires a publicly accessible URL. Use [ngrok](https://ngrok.com/) or similar:
 
 ```bash
 # Start your dev server
@@ -78,8 +78,38 @@ pnpm dev
 # In another terminal, expose it with ngrok
 ngrok http 3000
 
-# Use the ngrok URL as NEXT_PUBLIC_BASE_URL
+# Copy the ngrok URL (e.g., https://abc123.ngrok.io) and set it:
+# NEXT_PUBLIC_BASE_URL=https://abc123.ngrok.io
 ```
+
+### Troubleshooting
+
+If notifications aren't being received:
+
+1. **Check QStash logs**: Go to [Upstash Console](https://console.upstash.com/) → QStash → Logs to see if messages are being scheduled and delivered.
+
+2. **Verify environment variables**:
+
+   ```bash
+   QSTASH_TOKEN=your_token
+   QSTASH_CURRENT_SIGNING_KEY=your_key
+   QSTASH_NEXT_SIGNING_KEY=your_key
+   NEXT_PUBLIC_BASE_URL=https://your-domain.com  # Must be publicly accessible
+   ```
+
+3. **Check server logs**: Look for console logs showing:
+
+   - "Scheduling notification with QStash"
+   - "QStash callback received"
+   - Any error messages
+
+4. **Verify the endpoint is accessible**: Test your endpoint manually:
+
+   ```bash
+   curl https://your-domain.com/api/notifications/send-scheduled
+   ```
+
+5. **Check Vercel function logs**: If deployed on Vercel, check the function logs in the Vercel dashboard.
 
 ## Deploy on Vercel
 
