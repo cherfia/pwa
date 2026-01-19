@@ -1,20 +1,11 @@
-self.addEventListener("install", (event) => {
-  event.waitUntil(self.skipWaiting());
-});
-
-self.addEventListener("activate", (event) => {
-  event.waitUntil(self.clients.claim());
-});
-
-self.addEventListener("fetch", () => {
-  // Intentionally pass through to network; add caching here if needed later.
-});
+// Firebase Cloud Messaging Service Worker
+// This file is required by FCM - see: https://firebase.google.com/docs/cloud-messaging/web/get-started
 
 // Import Firebase scripts for messaging
 importScripts('https://www.gstatic.com/firebasejs/12.8.0/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/12.8.0/firebase-messaging-compat.js');
 
-// Firebase config will be passed via postMessage
+// Firebase config will be passed via postMessage from the main thread
 let firebaseInitialized = false;
 
 self.addEventListener('message', (event) => {
@@ -25,6 +16,7 @@ self.addEventListener('message', (event) => {
       const messaging = firebase.messaging();
 
       // Handle background messages from FCM
+      // This is called when a message is received and the app is in the background
       messaging.onBackgroundMessage((payload) => {
         console.log("[Service Worker]: Received FCM background message", payload);
 
@@ -58,58 +50,9 @@ self.addEventListener('message', (event) => {
   }
 });
 
-// Fallback: Handle standard push events (for compatibility)
-self.addEventListener("push", (event) => {
-  console.log("[Service Worker]: Received push event", event);
-
-  let notificationData = {};
-
-  try {
-    notificationData = event.data.json();
-  } catch (error) {
-    console.error("[Service Worker]: Error parsing notification data", error);
-    notificationData = {
-      title: "No data from server",
-      body: "Displaying default notification",
-      icon: "/android/android-launchericon-192-192.png",
-      badge: "/android/android-launchericon-72-72.png",
-    };
-  }
-
-  console.log("[Service Worker]: notificationData", notificationData);
-
-  const title = notificationData.title || "Notification";
-  const notificationOptions = {
-    body: notificationData.body || "",
-    icon: notificationData.icon || "/android/android-launchericon-192-192.png",
-    badge: notificationData.badge || "/android/android-launchericon-72-72.png",
-    image: notificationData.image,
-    dir: notificationData.dir || "auto",
-    lang: notificationData.lang || "en-US",
-    tag: notificationData.tag,
-    renotify: notificationData.renotify || false,
-    requireInteraction: notificationData.requireInteraction || false,
-    silent: notificationData.silent || false,
-    vibrate: notificationData.vibrate,
-    actions: notificationData.actions || [],
-    data: notificationData.data || {
-      url: notificationData.data?.url || "/",
-    },
-  };
-
-  const showNotificationPromise = self.registration.showNotification(
-    title,
-    notificationOptions
-  );
-
-  event.waitUntil(showNotificationPromise);
-});
-
+// Handle notification clicks
 self.addEventListener("notificationclick", (event) => {
-  console.log(
-    "[Service Worker]: Received notificationclick event",
-    event.notification
-  );
+  console.log("[Service Worker]: Received notificationclick event", event.notification);
 
   try {
     let notification = event.notification;

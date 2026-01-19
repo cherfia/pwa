@@ -1,34 +1,47 @@
 import { NextResponse } from "next/server";
-import webPush from "web-push";
+import admin from "firebase-admin";
 import { buildNotification } from "@/lib/notification-helpers";
 
-const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
-const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
-const VAPID_CONTACT =
-  process.env.VAPID_CONTACT_EMAIL ?? "mailto:admin@pwa-demo.local";
+let firebaseAdminInitialized = false;
 
-let vapidConfigured = false;
+function ensureFirebaseAdmin() {
+  if (firebaseAdminInitialized) return;
 
-function ensureVapid() {
-  if (vapidConfigured) return;
-  webPush.setVapidDetails(VAPID_CONTACT, VAPID_PUBLIC_KEY!, VAPID_PRIVATE_KEY!);
-  vapidConfigured = true;
+  if (!admin.apps.length) {
+    const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT;
+    
+    if (serviceAccount) {
+      try {
+        const serviceAccountJson = JSON.parse(serviceAccount);
+        admin.initializeApp({
+          credential: admin.credential.cert(serviceAccountJson),
+        });
+      } catch (error) {
+        console.error("Failed to parse FIREBASE_SERVICE_ACCOUNT:", error);
+        throw new Error("Invalid FIREBASE_SERVICE_ACCOUNT format");
+      }
+    } else {
+      admin.initializeApp();
+    }
+  }
+
+  firebaseAdminInitialized = true;
 }
 
 // Test endpoint to verify push notifications work
 export async function POST(request: Request) {
   try {
-    ensureVapid();
+    ensureFirebaseAdmin();
 
     const body = await request.json();
-    const { subscription, message } = body as {
-      subscription: any;
+    const { fcmToken, message } = body as {
+      fcmToken: string;
       message?: string;
     };
 
-    if (!subscription) {
+    if (!fcmToken) {
       return NextResponse.json(
-        { error: "Missing subscription" },
+        { error: "Missing FCM token" },
         { status: 400 }
       );
     }
@@ -37,13 +50,49 @@ export async function POST(request: Request) {
       "PWA Demo - Test",
       message || "Test notification from API"
     );
-    const payload = JSON.stringify(notification);
 
-    await webPush.sendNotification(subscription, payload);
+    const messagePayload = {
+      notification: {
+        title: notification.title,
+        body: notification.body,
+        imageUrl: notification.image,
+      },
+      data: {
+        ...notification.data,
+        icon: notification.icon || "",
+        badge: notification.badge || "",
+      },
+      android: {
+        notification: {
+          icon: notification.icon,
+          sound: notification.silent ? undefined : "default",
+          channelId: "default",
+        },
+      },
+      webpush: {
+        notification: {
+          icon: notification.icon,
+          badge: notification.badge,
+          image: notification.image,
+          requireInteraction: notification.requireInteraction,
+          tag: notification.tag,
+          renotify: notification.renotify,
+          vibrate: notification.vibrate,
+          actions: notification.actions,
+        },
+        fcmOptions: {
+          link: notification.data?.url || "/",
+        },
+      },
+      token: fcmToken,
+    };
+
+    const response = await admin.messaging().send(messagePayload);
 
     return NextResponse.json({
       success: true,
       message: "Test notification sent",
+      messageId: response,
     });
   } catch (error) {
     console.error("Test notification error:", error);

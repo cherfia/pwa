@@ -8,47 +8,11 @@ import {
   unsubscribeUser,
 } from "@/app/actions";
 import { isIOS } from "react-device-detect";
-
-type SerializedSubscription = {
-  endpoint: string;
-  keys: {
-    p256dh: string;
-    auth: string;
-  };
-  expirationTime?: number | null;
-};
-
-const vapidPublicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
-
-function arraysEqual(a: ArrayLike<number>, b: ArrayLike<number>): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] !== b[i]) return false;
-  }
-  return true;
-}
-
-function urlBase64ToUint8Array(base64String: string) {
-  // Trim whitespace and newlines that might be in env vars
-  const cleaned = base64String.trim().replace(/\s/g, "");
-  const padding = "=".repeat((4 - (cleaned.length % 4)) % 4);
-  const base64 = (cleaned + padding).replace(/-/g, "+").replace(/_/g, "/");
-  const rawData = typeof window !== "undefined" ? window.atob(base64) : "";
-  const outputArray = new Uint8Array(rawData.length);
-  for (let i = 0; i < rawData.length; ++i) {
-    outputArray[i] = rawData.charCodeAt(i);
-  }
-  
-  if (outputArray.length !== 65 && outputArray.length !== 64) {
-    console.warn(`VAPID key length is ${outputArray.length}, expected 65 bytes for Chrome compatibility`);
-  }
-  
-  return outputArray;
-}
+import { getFCMToken, onForegroundMessage } from "@/lib/firebase";
 
 export function PushNotificationManager() {
   const [isSupported, setIsSupported] = useState(false);
-  const [subscription, setSubscription] = useState<SerializedSubscription | null>(null);
+  const [fcmToken, setFcmToken] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [delaySeconds, setDelaySeconds] = useState<number>(0);
   const [permission, setPermission] = useState<NotificationPermission | "default">("default");
@@ -57,30 +21,38 @@ export function PushNotificationManager() {
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
-    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    if (!("serviceWorker" in navigator)) {
       setIsSupported(false);
-      setError("Push not supported in this browser.");
+      setError("Service worker not supported in this browser.");
       return;
     }
 
     setIsSupported(true);
     setPermission(Notification.permission);
 
-    const loadSubscription = async () => {
+    const loadToken = async () => {
       try {
-        const registration = await navigator.serviceWorker.ready;
-        const sub = await registration.pushManager.getSubscription();
-        if (sub) {
-          const serialized = JSON.parse(JSON.stringify(sub)) as SerializedSubscription;
-          setSubscription(serialized);
+        const token = await getFCMToken();
+        if (token) {
+          setFcmToken(token);
         }
       } catch (error) {
-        console.warn("Failed to load subscription:", error);
+        console.warn("Failed to load FCM token:", error);
         setError("Service worker not ready. Ensure HTTPS is enabled and the service worker is registered.");
       }
     };
 
-    void loadSubscription();
+    void loadToken();
+
+    // Listen for foreground messages
+    const unsubscribe = onForegroundMessage((payload) => {
+      console.log("Foreground message received:", payload);
+      setStatus(`📨 Message received: ${payload.notification?.title || payload.data?.title || "New notification"}`);
+    });
+
+    return () => {
+      unsubscribe();
+    };
   }, []);
 
   const subscribe = async () => {
@@ -98,45 +70,14 @@ export function PushNotificationManager() {
         return;
       }
 
-      const registration = await navigator.serviceWorker.ready;
+      const token = await getFCMToken();
       
-      if (!vapidPublicKey) {
-        throw new Error("VAPID public key is not available");
+      if (!token) {
+        throw new Error("Failed to get FCM token. Make sure Firebase is configured correctly.");
       }
-      
-      // Chrome may have a cached failed subscription - try to get existing first
-      let existingSub = await registration.pushManager.getSubscription();
-      if (existingSub) {
-        // Check if existing subscription uses the same key
-        const existingKey = existingSub.options?.applicationServerKey;
-        const newKey = urlBase64ToUint8Array(vapidPublicKey);
-        
-        // If keys don't match or subscription is invalid, unsubscribe first
-        // Chrome caches failed subscriptions and needs them cleared
-        if (existingKey) {
-          const existingKeyArray = existingKey instanceof ArrayBuffer 
-            ? new Uint8Array(existingKey) 
-            : new Uint8Array(existingKey);
-          if (!arraysEqual(existingKeyArray, newKey)) {
-            await existingSub.unsubscribe();
-            existingSub = null;
-          }
-        } else {
-          // No key in existing sub, unsubscribe to clear Chrome's cache
-          await existingSub.unsubscribe();
-          existingSub = null;
-        }
-      }
-      
-      const applicationServerKey = urlBase64ToUint8Array(vapidPublicKey);
-      const sub = existingSub || await registration.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey,
-      });
 
-      const serialized = JSON.parse(JSON.stringify(sub)) as SerializedSubscription;
-      setSubscription(serialized);
-      await subscribeUser(serialized);
+      setFcmToken(token);
+      await subscribeUser(token);
       setStatus("✅ Subscribed to push notifications! You can now send test notifications.");
     } catch (error) {
       const err = error as Error;
@@ -152,10 +93,8 @@ export function PushNotificationManager() {
     setStatus(null);
     setIsLoading(true);
     try {
-      const registration = await navigator.serviceWorker.ready;
-      const sub = await registration.pushManager.getSubscription();
-      await sub?.unsubscribe();
-      setSubscription(null);
+      // FCM tokens are managed server-side, so we just clear the local token
+      setFcmToken(null);
       await unsubscribeUser();
       setStatus("Unsubscribed.");
     } catch (error) {
@@ -169,7 +108,7 @@ export function PushNotificationManager() {
     setError(null);
     setStatus(null);
     
-    if (!subscription) {
+    if (!fcmToken) {
       setError("Please subscribe first by clicking the Subscribe button.");
       return;
     }
@@ -187,7 +126,7 @@ export function PushNotificationManager() {
         const result = await scheduleNotification(
           messageToSend,
           delaySeconds,
-          subscription
+          fcmToken
         );
         
         if ("scheduledFor" in result && result.scheduledFor) {
@@ -203,7 +142,7 @@ export function PushNotificationManager() {
         }
       } else {
         // Send immediately
-        await sendNotification(messageToSend, subscription);
+        await sendNotification(messageToSend, fcmToken);
         setMessage("");
         setStatus("✅ Notification sent! Check your notifications.");
       }
@@ -235,7 +174,7 @@ export function PushNotificationManager() {
             Permission: {permission}
           </p>
         </div>
-        {subscription ? (
+        {fcmToken ? (
           <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-100">
             Subscribed
           </span>
@@ -274,7 +213,7 @@ export function PushNotificationManager() {
         </p>
       </div>
 
-      {!subscription && (
+      {!fcmToken && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/60 dark:text-amber-100">
           Click <strong>Subscribe</strong> to enable push notifications. You'll need to grant permission if prompted.
         </div>
@@ -284,21 +223,21 @@ export function PushNotificationManager() {
         <button
           className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-white dark:text-black dark:hover:bg-zinc-200"
           onClick={subscribe}
-          disabled={!!subscription || isLoading}
+          disabled={!!fcmToken || isLoading}
         >
           {isLoading ? "Subscribing..." : "Subscribe"}
         </button>
         <button
           className="rounded-lg border border-zinc-200 px-4 py-2 text-sm font-semibold text-zinc-900 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-50 dark:hover:bg-zinc-800"
           onClick={unsubscribe}
-          disabled={!subscription || isLoading}
+          disabled={!fcmToken || isLoading}
         >
           {isLoading ? "Unsubscribing..." : "Unsubscribe"}
         </button>
         <button
           className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
           onClick={send}
-          disabled={!subscription || isLoading || !message.trim()}
+          disabled={!fcmToken || isLoading || !message.trim()}
         >
           {isLoading
             ? delaySeconds > 0

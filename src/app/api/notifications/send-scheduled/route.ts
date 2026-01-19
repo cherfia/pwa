@@ -1,28 +1,32 @@
 import { NextResponse } from "next/server";
 import { verifySignatureAppRouter } from "@upstash/qstash/nextjs";
-import webPush from "web-push";
+import admin from "firebase-admin";
 import { buildNotification } from "@/lib/notification-helpers";
 
-type SerializedSubscription = {
-  endpoint: string;
-  keys: {
-    p256dh: string;
-    auth: string;
-  };
-  expirationTime?: number | null;
-};
+let firebaseAdminInitialized = false;
 
-const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
-const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
-const VAPID_CONTACT =
-  process.env.VAPID_CONTACT_EMAIL ?? "mailto:admin@pwa-demo.local";
+function ensureFirebaseAdmin() {
+  if (firebaseAdminInitialized) return;
 
-let vapidConfigured = false;
+  if (!admin.apps.length) {
+    const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT;
+    
+    if (serviceAccount) {
+      try {
+        const serviceAccountJson = JSON.parse(serviceAccount);
+        admin.initializeApp({
+          credential: admin.credential.cert(serviceAccountJson),
+        });
+      } catch (error) {
+        console.error("Failed to parse FIREBASE_SERVICE_ACCOUNT:", error);
+        throw new Error("Invalid FIREBASE_SERVICE_ACCOUNT format");
+      }
+    } else {
+      admin.initializeApp();
+    }
+  }
 
-function ensureVapid() {
-  if (vapidConfigured) return;
-  webPush.setVapidDetails(VAPID_CONTACT, VAPID_PUBLIC_KEY!, VAPID_PRIVATE_KEY!);
-  vapidConfigured = true;
+  firebaseAdminInitialized = true;
 }
 
 async function handler(request: Request) {
@@ -30,80 +34,88 @@ async function handler(request: Request) {
   try {
     console.log("QStash callback received at:", new Date().toISOString());
 
-    ensureVapid();
+    ensureFirebaseAdmin();
 
     const body = await request.json();
     console.log("Received body:", {
       id: body.id,
       hasMessage: !!body.message,
-      hasSubscription: !!body.subscription,
-      subscriptionKeys: body.subscription
-        ? Object.keys(body.subscription)
-        : null,
-      subscriptionEndpoint: body.subscription?.endpoint
-        ? body.subscription.endpoint.substring(0, 50) + "..."
+      hasFcmToken: !!body.fcmToken,
+      fcmTokenPreview: body.fcmToken
+        ? body.fcmToken.substring(0, 50) + "..."
         : null,
     });
 
-    const { id, message, subscription } = body as {
+    const { id, message, fcmToken } = body as {
       id: string;
       message: string;
-      subscription: SerializedSubscription;
+      fcmToken: string;
     };
 
     notificationId = id;
 
-    if (!message || !subscription) {
+    if (!message || !fcmToken) {
       console.error("Missing required fields:", {
         message: !!message,
-        subscription: !!subscription,
+        fcmToken: !!fcmToken,
       });
       return NextResponse.json(
-        { error: "Missing message or subscription" },
-        { status: 400 }
-      );
-    }
-
-    // Validate subscription structure
-    if (
-      !subscription.endpoint ||
-      !subscription.keys ||
-      !subscription.keys.p256dh ||
-      !subscription.keys.auth
-    ) {
-      console.error("Invalid subscription structure:", {
-        hasEndpoint: !!subscription.endpoint,
-        hasKeys: !!subscription.keys,
-        hasP256dh: !!subscription.keys?.p256dh,
-        hasAuth: !!subscription.keys?.auth,
-      });
-      return NextResponse.json(
-        { error: "Invalid subscription structure" },
+        { error: "Missing message or FCM token" },
         { status: 400 }
       );
     }
 
     const notification = buildNotification("PWA Demo", message);
-    const payload = JSON.stringify(notification);
+
+    const messagePayload = {
+      notification: {
+        title: notification.title,
+        body: notification.body,
+        imageUrl: notification.image,
+      },
+      data: {
+        ...notification.data,
+        icon: notification.icon || "",
+        badge: notification.badge || "",
+      },
+      android: {
+        notification: {
+          icon: notification.icon,
+          sound: notification.silent ? undefined : "default",
+          channelId: "default",
+        },
+      },
+      webpush: {
+        notification: {
+          icon: notification.icon,
+          badge: notification.badge,
+          image: notification.image,
+          requireInteraction: notification.requireInteraction,
+          tag: notification.tag,
+          renotify: notification.renotify,
+          vibrate: notification.vibrate,
+          actions: notification.actions,
+        },
+        fcmOptions: {
+          link: notification.data?.url || "/",
+        },
+      },
+      token: fcmToken,
+    };
 
     console.log(
-      `Sending push notification for scheduled notification ${notificationId}`
+      `Sending FCM notification for scheduled notification ${notificationId}`
     );
-    console.log("Subscription details:", {
-      endpoint: subscription.endpoint?.substring(0, 50) + "...",
-      hasKeys: !!subscription.keys,
-    });
 
     try {
-      await webPush.sendNotification(subscription, payload);
-      console.log(`Successfully sent notification ${notificationId}`);
-    } catch (pushError) {
-      console.error("webPush.sendNotification error:", pushError);
-      if (pushError instanceof Error) {
+      const response = await admin.messaging().send(messagePayload);
+      console.log(`Successfully sent notification ${notificationId}`, response);
+    } catch (pushError: any) {
+      console.error("FCM send error:", pushError);
+      if (pushError instanceof Error || pushError?.code) {
         console.error("Push error details:", {
           message: pushError.message,
-          name: pushError.name,
-          code: (pushError as any).statusCode,
+          code: pushError.code,
         });
       }
       throw pushError; // Re-throw to be caught by outer catch
@@ -114,24 +126,29 @@ async function handler(request: Request) {
       id: notificationId,
       sentAt: Date.now(),
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error("Send scheduled notification error:", error);
 
-    if (error instanceof Error) {
+    if (error instanceof Error || error?.code) {
       console.error("Error details:", {
         message: error.message,
+        code: error.code,
         stack: error.stack,
       });
 
-      // Don't throw for expired subscriptions - QStash will retry otherwise
+      // Don't throw for expired/invalid tokens - QStash will retry otherwise
+      const errorCode = error.code || error.message;
       if (
-        error.message.includes("expired") ||
-        error.message.includes("410") ||
-        error.message.includes("404")
+        errorCode?.includes("invalid-registration-token") ||
+        errorCode?.includes("registration-token-not-registered") ||
+        errorCode?.includes("unregistered") ||
+        errorCode?.includes("expired") ||
+        errorCode?.includes("410") ||
+        errorCode?.includes("404")
       ) {
-        console.log(`Subscription expired for notification ${notificationId}`);
+        console.log(`FCM token expired/invalid for notification ${notificationId}`);
         return NextResponse.json(
-          { error: "Subscription expired", id: notificationId },
+          { error: "FCM token expired or invalid", id: notificationId },
           { status: 200 } // Return 200 so QStash doesn't retry
         );
       }

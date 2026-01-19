@@ -1,29 +1,42 @@
 "use server";
 
-import webPush from "web-push";
+import admin from "firebase-admin";
 import { Client } from "@upstash/qstash";
 import { randomUUID } from "crypto";
 import { buildNotification } from "@/lib/notification-helpers";
 
-type SerializedSubscription = {
-  endpoint: string;
-  keys: {
-    p256dh: string;
-    auth: string;
-  };
-  expirationTime?: number | null;
-};
-
-const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
-const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
-const VAPID_CONTACT =
-  process.env.VAPID_CONTACT_EMAIL ?? "mailto:admin@pwa-demo.local";
 const QSTASH_TOKEN = process.env.QSTASH_TOKEN;
 const QSTASH_CURRENT_SIGNING_KEY = process.env.QSTASH_CURRENT_SIGNING_KEY;
 const QSTASH_NEXT_SIGNING_KEY = process.env.QSTASH_NEXT_SIGNING_KEY;
 
-let subscriptionStore: SerializedSubscription | null = null;
-let vapidConfigured = false;
+let tokenStore: string | null = null;
+let firebaseAdminInitialized = false;
+
+// Initialize Firebase Admin
+function ensureFirebaseAdmin() {
+  if (firebaseAdminInitialized) return;
+
+  if (!admin.apps.length) {
+    const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT;
+    
+    if (serviceAccount) {
+      try {
+        const serviceAccountJson = JSON.parse(serviceAccount);
+        admin.initializeApp({
+          credential: admin.credential.cert(serviceAccountJson),
+        });
+      } catch (error) {
+        console.error("Failed to parse FIREBASE_SERVICE_ACCOUNT:", error);
+        throw new Error("Invalid FIREBASE_SERVICE_ACCOUNT format");
+      }
+    } else {
+      // Try to use default credentials (for environments like Vercel with Firebase integration)
+      admin.initializeApp();
+    }
+  }
+
+  firebaseAdminInitialized = true;
+}
 
 // Initialize QStash client (only if token is provided)
 const qstashClient = QSTASH_TOKEN
@@ -32,60 +45,85 @@ const qstashClient = QSTASH_TOKEN
     })
   : null;
 
-function ensureVapid() {
-  if (vapidConfigured) return;
-  console.log("Server VAPID Public Key length:", VAPID_PUBLIC_KEY?.length || 0);
-  console.log(
-    "Server VAPID Public Key (first 20 chars):",
-    VAPID_PUBLIC_KEY?.substring(0, 20) || "missing"
-  );
-  webPush.setVapidDetails(VAPID_CONTACT, VAPID_PUBLIC_KEY!, VAPID_PRIVATE_KEY!);
-  vapidConfigured = true;
-}
-
-export async function subscribeUser(subscription: SerializedSubscription) {
-  ensureVapid();
-  subscriptionStore = subscription;
+export async function subscribeUser(token: string) {
+  tokenStore = token;
   return { success: true };
 }
 
 export async function unsubscribeUser() {
-  subscriptionStore = null;
+  tokenStore = null;
   return { success: true };
 }
 
 export async function sendNotification(
   message: string,
-  subscription?: SerializedSubscription
+  fcmToken?: string
 ) {
   try {
-    ensureVapid();
+    ensureFirebaseAdmin();
 
-    // Use provided subscription or fall back to stored one
-    const sub = subscription || subscriptionStore;
+    // Use provided token or fall back to stored one
+    const token = fcmToken || tokenStore;
 
-    if (!sub) {
-      throw new Error("No subscription available. Please subscribe first.");
+    if (!token) {
+      throw new Error("No FCM token available. Please subscribe first.");
     }
 
     const notification = buildNotification("PWA Demo", message);
-    const payload = JSON.stringify(notification);
 
-    await webPush.sendNotification(sub, payload);
+    const messagePayload = {
+      notification: {
+        title: notification.title,
+        body: notification.body,
+        imageUrl: notification.image,
+      },
+      data: {
+        ...notification.data,
+        icon: notification.icon || "",
+        badge: notification.badge || "",
+      },
+      android: {
+        notification: {
+          icon: notification.icon,
+          sound: notification.silent ? undefined : "default",
+          channelId: "default",
+        },
+      },
+      webpush: {
+        notification: {
+          icon: notification.icon,
+          badge: notification.badge,
+          image: notification.image,
+          requireInteraction: notification.requireInteraction,
+          tag: notification.tag,
+          renotify: notification.renotify,
+          vibrate: notification.vibrate,
+          actions: notification.actions,
+        },
+        fcmOptions: {
+          link: notification.data?.url || "/",
+        },
+      },
+      token,
+    };
 
-    return { success: true };
-  } catch (error) {
+    const response = await admin.messaging().send(messagePayload);
+    console.log("Successfully sent FCM message:", response);
+
+    return { success: true, messageId: response };
+  } catch (error: any) {
     console.error("Send notification error:", error);
 
     // Provide more specific error messages
-    if (error instanceof Error) {
-      if (error.message.includes("expired") || error.message.includes("410")) {
-        throw new Error("Subscription expired. Please subscribe again.");
+    if (error instanceof Error || error?.code) {
+      const errorCode = error.code || error.message;
+      if (errorCode?.includes("invalid-registration-token") || errorCode?.includes("registration-token-not-registered")) {
+        throw new Error("FCM token expired or invalid. Please subscribe again.");
       }
-      if (error.message.includes("404") || error.message.includes("410")) {
-        throw new Error("Subscription not found. Please subscribe again.");
+      if (errorCode?.includes("unregistered")) {
+        throw new Error("FCM token not registered. Please subscribe again.");
       }
-      throw new Error(`Failed to send notification: ${error.message}`);
+      throw new Error(`Failed to send notification: ${error.message || errorCode}`);
     }
 
     throw new Error("Failed to send notification. Please try again.");
@@ -95,18 +133,18 @@ export async function sendNotification(
 export async function scheduleNotification(
   message: string,
   delaySeconds: number,
-  subscription?: SerializedSubscription
+  fcmToken?: string
 ) {
   try {
-    const sub = subscription || subscriptionStore;
+    const token = fcmToken || tokenStore;
 
-    if (!sub) {
-      throw new Error("No subscription available. Please subscribe first.");
+    if (!token) {
+      throw new Error("No FCM token available. Please subscribe first.");
     }
 
     if (delaySeconds <= 0) {
       // Send immediately
-      return await sendNotification(message, sub);
+      return await sendNotification(message, token);
     }
 
     if (!qstashClient) {
@@ -137,7 +175,7 @@ export async function scheduleNotification(
       body: {
         id: notificationId,
         message,
-        subscription: sub,
+        fcmToken: token,
       },
       delay: delaySeconds, // Delay in seconds
     });
