@@ -32,26 +32,41 @@ export function PushNotificationManager() {
 
     const loadToken = async () => {
       try {
+        // Check if Firebase is configured
+        if (!process.env.NEXT_PUBLIC_FIREBASE_API_KEY) {
+          console.warn("Firebase not configured, skipping token load");
+          return;
+        }
+        
         const token = await getFCMToken();
         if (token) {
           setFcmToken(token);
         }
       } catch (error) {
         console.warn("Failed to load FCM token:", error);
-        setError("Service worker not ready. Ensure HTTPS is enabled and the service worker is registered.");
+        // Don't set error state on initial load - user might not have Firebase configured yet
       }
     };
 
     void loadToken();
 
-    // Listen for foreground messages
-    const unsubscribe = onForegroundMessage((payload) => {
-      console.log("Foreground message received:", payload);
-      setStatus(`📨 Message received: ${payload.notification?.title || payload.data?.title || "New notification"}`);
-    });
+    // Listen for foreground messages (only if Firebase is available)
+    let unsubscribe: (() => void) | undefined;
+    try {
+      if (process.env.NEXT_PUBLIC_FIREBASE_API_KEY) {
+        unsubscribe = onForegroundMessage((payload) => {
+          console.log("Foreground message received:", payload);
+          setStatus(`📨 Message received: ${payload.notification?.title || payload.data?.title || "New notification"}`);
+        });
+      }
+    } catch (error) {
+      console.warn("Failed to set up foreground message listener:", error);
+    }
 
     return () => {
-      unsubscribe();
+      if (unsubscribe) {
+        unsubscribe();
+      }
     };
   }, []);
 

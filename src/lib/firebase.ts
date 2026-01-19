@@ -29,15 +29,26 @@ let messaging: Messaging | null = null;
 
 // Initialize Firebase
 if (typeof window !== 'undefined') {
-  app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
-  
-  // Initialize messaging only in browser
-  if ('serviceWorker' in navigator) {
-    try {
-      messaging = getMessaging(app);
-    } catch (error) {
-      console.warn('Firebase messaging initialization failed:', error);
+  try {
+    // Check if required config is present before initializing
+    if (!firebaseConfig.apiKey || !firebaseConfig.projectId || !firebaseConfig.messagingSenderId || !firebaseConfig.appId) {
+      console.warn('Firebase config incomplete, skipping initialization');
+    } else {
+      app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
+      
+      // Initialize messaging only in browser and if service workers are supported
+      if ('serviceWorker' in navigator) {
+        try {
+          messaging = getMessaging(app);
+        } catch (error) {
+          console.warn('Firebase messaging initialization failed:', error);
+          // Don't throw - allow app to continue without messaging
+        }
+      }
     }
+  } catch (error) {
+    console.error('Firebase initialization failed:', error);
+    // Don't throw - allow app to continue without Firebase
   }
 }
 

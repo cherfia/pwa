@@ -1,17 +1,34 @@
 // Firebase Cloud Messaging Service Worker
 // This file is required by FCM - see: https://firebase.google.com/docs/cloud-messaging/web/get-started
 
-// Import Firebase scripts for messaging
-importScripts('https://www.gstatic.com/firebasejs/12.8.0/firebase-app-compat.js');
-importScripts('https://www.gstatic.com/firebasejs/12.8.0/firebase-messaging-compat.js');
+// Import Firebase scripts for messaging (with error handling for iOS)
+let firebaseAvailable = false;
+try {
+  importScripts('https://www.gstatic.com/firebasejs/12.8.0/firebase-app-compat.js');
+  importScripts('https://www.gstatic.com/firebasejs/12.8.0/firebase-messaging-compat.js');
+  firebaseAvailable = typeof firebase !== 'undefined';
+} catch (error) {
+  console.warn('[Service Worker]: Firebase scripts failed to load, continuing without FCM:', error);
+  firebaseAvailable = false;
+}
 
 // Firebase config will be passed via postMessage from the main thread
 let firebaseInitialized = false;
 
 self.addEventListener('message', (event) => {
   if (event.data && event.data.type === 'FIREBASE_CONFIG' && !firebaseInitialized) {
+    if (!firebaseAvailable) {
+      console.warn('[Service Worker]: Firebase not available, skipping FCM initialization');
+      return;
+    }
+    
     const firebaseConfig = event.data.config;
     try {
+      if (typeof firebase === 'undefined') {
+        console.warn('[Service Worker]: Firebase object not available');
+        return;
+      }
+      
       firebase.initializeApp(firebaseConfig);
       const messaging = firebase.messaging();
 
