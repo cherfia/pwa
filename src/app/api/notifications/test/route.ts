@@ -51,17 +51,28 @@ export async function POST(request: Request) {
       message || "Test notification from API"
     );
 
+    // Firebase Admin SDK requires all data values to be strings
+    const dataPayload: { [key: string]: string } = {
+      icon: notification.icon || "",
+      badge: notification.badge || "",
+    };
+
+    // Convert all notification.data values to strings
+    if (notification.data) {
+      Object.entries(notification.data).forEach(([key, value]) => {
+        if (value !== undefined && value !== null) {
+          dataPayload[key] = String(value);
+        }
+      });
+    }
+
     const messagePayload = {
       notification: {
         title: notification.title,
         body: notification.body,
         imageUrl: notification.image,
       },
-      data: {
-        ...notification.data,
-        icon: notification.icon || "",
-        badge: notification.badge || "",
-      },
+      data: dataPayload,
       android: {
         notification: {
           icon: notification.icon,
