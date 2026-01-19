@@ -1,14 +1,28 @@
 import { initializeApp, getApps, FirebaseApp } from 'firebase/app';
 import { getMessaging, getToken, onMessage, Messaging } from 'firebase/messaging';
 
+// Minimal Firebase config for FCM push notifications
+// Required fields: apiKey, projectId, messagingSenderId, appId
+// Optional: authDomain, storageBucket (auto-derived from projectId if not provided)
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
-  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN || 
+    (process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID ? `${process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID}.firebaseapp.com` : undefined),
   projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
+  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET || 
+    (process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID ? `${process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID}.appspot.com` : undefined),
   messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
 };
+
+// Validate required fields
+if (typeof window !== 'undefined') {
+  const required = ['apiKey', 'projectId', 'messagingSenderId', 'appId'] as const;
+  const missing = required.filter(key => !firebaseConfig[key]);
+  if (missing.length > 0) {
+    console.warn(`Missing required Firebase config: ${missing.join(', ')}. FCM may not work correctly.`);
+  }
+}
 
 let app: FirebaseApp;
 let messaging: Messaging | null = null;
