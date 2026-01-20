@@ -1,32 +1,16 @@
 import { NextResponse } from "next/server";
 import { verifySignatureAppRouter } from "@upstash/qstash/nextjs";
-import admin from "firebase-admin";
+import webpush from "web-push";
 import { buildNotification } from "@/lib/notification-helpers";
 
-let firebaseAdminInitialized = false;
+// VAPID keys for Web Push
+const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || "mailto:admin@example.com";
 
-function ensureFirebaseAdmin() {
-  if (firebaseAdminInitialized) return;
-
-  if (!admin.apps.length) {
-    const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT;
-    
-    if (serviceAccount) {
-      try {
-        const serviceAccountJson = JSON.parse(serviceAccount);
-        admin.initializeApp({
-          credential: admin.credential.cert(serviceAccountJson),
-        });
-      } catch (error) {
-        console.error("Failed to parse FIREBASE_SERVICE_ACCOUNT:", error);
-        throw new Error("Invalid FIREBASE_SERVICE_ACCOUNT format");
-      }
-    } else {
-      admin.initializeApp();
-    }
-  }
-
-  firebaseAdminInitialized = true;
+// Initialize web-push with VAPID details
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
 }
 
 async function handler(request: Request) {
@@ -34,102 +18,77 @@ async function handler(request: Request) {
   try {
     console.log("QStash callback received at:", new Date().toISOString());
 
-    ensureFirebaseAdmin();
-
     const body = await request.json();
     console.log("Received body:", {
       id: body.id,
       hasMessage: !!body.message,
-      hasFcmToken: !!body.fcmToken,
-      fcmTokenPreview: body.fcmToken
-        ? body.fcmToken.substring(0, 50) + "..."
-        : null,
+      hasSubscription: !!body.subscription,
     });
 
-    const { id, message, fcmToken } = body as {
+    const { id, message, subscription } = body as {
       id: string;
       message: string;
-      fcmToken: string;
+      subscription: PushSubscriptionJSON;
     };
 
     notificationId = id;
 
-    if (!message || !fcmToken) {
+    if (!message || !subscription) {
       console.error("Missing required fields:", {
         message: !!message,
-        fcmToken: !!fcmToken,
+        subscription: !!subscription,
       });
       return NextResponse.json(
-        { error: "Missing message or FCM token" },
+        { error: "Missing message or subscription" },
         { status: 400 }
+      );
+    }
+
+    if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
+      console.error("VAPID keys not configured");
+      return NextResponse.json(
+        { error: "VAPID keys not configured" },
+        { status: 500 }
       );
     }
 
     const notification = buildNotification("PWA Demo", message);
 
-    // Firebase Admin SDK requires all data values to be strings
-    const dataPayload: { [key: string]: string } = {
-      icon: notification.icon || "",
-      badge: notification.badge || "",
-    };
-
-    // Convert all notification.data values to strings
-    if (notification.data) {
-      Object.entries(notification.data).forEach(([key, value]) => {
-        if (value !== undefined && value !== null) {
-          dataPayload[key] = String(value);
-        }
-      });
-    }
-
-    const messagePayload = {
-      notification: {
-        title: notification.title,
-        body: notification.body,
-        imageUrl: notification.image,
-      },
-      data: dataPayload,
-      android: {
-        notification: {
-          icon: notification.icon,
-          sound: notification.silent ? undefined : "default",
-          channelId: "default",
-        },
-      },
-      webpush: {
-        notification: {
-          icon: notification.icon,
-          badge: notification.badge,
-          image: notification.image,
-          requireInteraction: notification.requireInteraction,
-          tag: notification.tag,
-          renotify: notification.renotify,
-          vibrate: notification.vibrate,
-          actions: notification.actions,
-        },
-        fcmOptions: {
-          link: notification.data?.url || "/",
-        },
-      },
-      token: fcmToken,
-    };
+    const payload = JSON.stringify({
+      title: notification.title,
+      body: notification.body,
+      icon: notification.icon,
+      badge: notification.badge,
+      image: notification.image,
+      tag: notification.tag,
+      data: notification.data,
+    });
 
     console.log(
-      `Sending FCM notification for scheduled notification ${notificationId}`
+      `Sending Web Push notification for scheduled notification ${notificationId}`
     );
 
     try {
-      const response = await admin.messaging().send(messagePayload);
-      console.log(`Successfully sent notification ${notificationId}`, response);
+      await webpush.sendNotification(
+        subscription as webpush.PushSubscription,
+        payload
+      );
+      console.log(`Successfully sent notification ${notificationId}`);
     } catch (pushError: any) {
-      console.error("FCM send error:", pushError);
-      if (pushError instanceof Error || pushError?.code) {
-        console.error("Push error details:", {
-          message: pushError.message,
-          code: pushError.code,
-        });
+      console.error("Web Push send error:", pushError);
+
+      // Don't throw for expired/invalid subscriptions - QStash will retry otherwise
+      if (pushError.statusCode === 410 || pushError.statusCode === 404) {
+        console.log(
+          `Subscription expired/invalid for notification ${notificationId}`
+        );
+        return NextResponse.json(
+          { error: "Subscription expired or invalid", id: notificationId },
+          { status: 200 } // Return 200 so QStash doesn't retry
+        );
       }
-      throw pushError; // Re-throw to be caught by outer catch
+
+      throw pushError;
     }
 
     return NextResponse.json({
@@ -140,31 +99,6 @@ async function handler(request: Request) {
   } catch (error: any) {
     console.error("Send scheduled notification error:", error);
 
-    if (error instanceof Error || error?.code) {
-      console.error("Error details:", {
-        message: error.message,
-        code: error.code,
-        stack: error.stack,
-      });
-
-      // Don't throw for expired/invalid tokens - QStash will retry otherwise
-      const errorCode = error.code || error.message;
-      if (
-        errorCode?.includes("invalid-registration-token") ||
-        errorCode?.includes("registration-token-not-registered") ||
-        errorCode?.includes("unregistered") ||
-        errorCode?.includes("expired") ||
-        errorCode?.includes("410") ||
-        errorCode?.includes("404")
-      ) {
-        console.log(`FCM token expired/invalid for notification ${notificationId}`);
-        return NextResponse.json(
-          { error: "FCM token expired or invalid", id: notificationId },
-          { status: 200 } // Return 200 so QStash doesn't retry
-        );
-      }
-    }
-
     return NextResponse.json(
       { error: "Failed to send notification", id: notificationId },
       { status: 500 }
@@ -173,10 +107,8 @@ async function handler(request: Request) {
 }
 
 // verifySignatureAppRouter automatically loads QSTASH_CURRENT_SIGNING_KEY and QSTASH_NEXT_SIGNING_KEY from env
-// If signing keys are not set, it will throw an error, so we handle that case
 export const POST = async (request: Request) => {
   try {
-    // Check if signing keys are available
     if (
       process.env.QSTASH_CURRENT_SIGNING_KEY ||
       process.env.QSTASH_NEXT_SIGNING_KEY
@@ -184,7 +116,7 @@ export const POST = async (request: Request) => {
       return verifySignatureAppRouter(handler)(request);
     } else {
       console.warn(
-        "QStash signing keys not set - skipping signature verification (not recommended for production)"
+        "QStash signing keys not set - skipping signature verification"
       );
       return handler(request);
     }

@@ -6,9 +6,7 @@ import {
   scheduleNotification,
   subscribeUser,
   unsubscribeUser,
-  type PushSubscription,
 } from "@/app/actions";
-import { getFCMToken, onForegroundMessage } from "@/lib/firebase";
 
 // Convert VAPID key from base64 to Uint8Array for Web Push
 function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuffer> {
@@ -25,7 +23,7 @@ function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuffer> {
 export function PushNotificationManager() {
   const [isSupported, setIsSupported] = useState(false);
   const [isIOSDevice, setIsIOSDevice] = useState(false);
-  const [subscription, setSubscription] = useState<PushSubscription | null>(null);
+  const [subscription, setSubscription] = useState<PushSubscriptionJSON | null>(null);
   const [message, setMessage] = useState("");
   const [delaySeconds, setDelaySeconds] = useState<number>(0);
   const [permission, setPermission] = useState<NotificationPermission | "default">("default");
@@ -47,49 +45,7 @@ export function PushNotificationManager() {
 
     setIsSupported(true);
     setPermission(Notification.permission);
-
-    // Listen for foreground messages (only for non-iOS with Firebase)
-    let unsubscribe: (() => void) | undefined;
-    try {
-      if (!iOS && process.env.NEXT_PUBLIC_FIREBASE_API_KEY) {
-        unsubscribe = onForegroundMessage((payload) => {
-          console.log("Foreground message received:", payload);
-          setStatus(`📨 Message received: ${payload.notification?.title || payload.data?.title || "New notification"}`);
-        });
-      }
-    } catch (error) {
-      console.warn("Failed to set up foreground message listener:", error);
-    }
-
-    return () => {
-      if (unsubscribe) {
-        unsubscribe();
-      }
-    };
   }, []);
-
-  // Get Web Push subscription (for iOS)
-  const getWebPushSubscription = async (): Promise<PushSubscription> => {
-    const vapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
-    if (!vapidKey) {
-      throw new Error("VAPID key not configured. Contact the administrator.");
-    }
-
-    const registration = await navigator.serviceWorker.ready;
-    let webPushSub = await registration.pushManager.getSubscription();
-
-    if (!webPushSub) {
-      webPushSub = await registration.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(vapidKey),
-      });
-    }
-
-    return {
-      type: 'webpush',
-      subscription: webPushSub.toJSON() as PushSubscriptionJSON,
-    };
-  };
 
   const subscribe = async () => {
     setError(null);
@@ -99,6 +55,11 @@ export function PushNotificationManager() {
     try {
       if (!("Notification" in window)) {
         throw new Error("Notifications not supported. On iOS, add this app to your home screen first.");
+      }
+
+      const vapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
+      if (!vapidKey) {
+        throw new Error("VAPID key not configured.");
       }
       
       const permissionResult = await Notification.requestPermission();
@@ -110,25 +71,20 @@ export function PushNotificationManager() {
         return;
       }
 
-      let sub: PushSubscription;
+      const registration = await navigator.serviceWorker.ready;
+      let webPushSub = await registration.pushManager.getSubscription();
 
-      if (isIOSDevice) {
-        // iOS: Use standard Web Push API (FCM doesn't work on iOS)
-        sub = await getWebPushSubscription();
-      } else {
-        // Android/Desktop: Try FCM first, fallback to Web Push
-        const token = await getFCMToken();
-        if (token) {
-          sub = { type: 'fcm', token };
-        } else {
-          console.warn("FCM failed, falling back to Web Push");
-          sub = await getWebPushSubscription();
-        }
+      if (!webPushSub) {
+        webPushSub = await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(vapidKey),
+        });
       }
 
-      setSubscription(sub);
-      await subscribeUser(sub);
-      setStatus(`✅ Subscribed via ${sub.type === 'fcm' ? 'FCM' : 'Web Push'}! You can now send test notifications.`);
+      const subJson = webPushSub.toJSON() as PushSubscriptionJSON;
+      setSubscription(subJson);
+      await subscribeUser(subJson);
+      setStatus("✅ Subscribed to push notifications!");
     } catch (error) {
       const err = error as Error;
       setError(`Subscription failed: ${err.message || "Unknown error"}`);
@@ -143,13 +99,10 @@ export function PushNotificationManager() {
     setStatus(null);
     setIsLoading(true);
     try {
-      // Unsubscribe from Web Push if applicable
-      if (subscription?.type === 'webpush') {
-        const registration = await navigator.serviceWorker.ready;
-        const webPushSub = await registration.pushManager.getSubscription();
-        if (webPushSub) {
-          await webPushSub.unsubscribe();
-        }
+      const registration = await navigator.serviceWorker.ready;
+      const webPushSub = await registration.pushManager.getSubscription();
+      if (webPushSub) {
+        await webPushSub.unsubscribe();
       }
       setSubscription(null);
       await unsubscribeUser();
@@ -179,7 +132,6 @@ export function PushNotificationManager() {
       const messageToSend = message.trim();
       
       if (delaySeconds > 0) {
-        // Schedule the notification on the server
         const result = await scheduleNotification(
           messageToSend,
           delaySeconds,
@@ -191,14 +143,13 @@ export function PushNotificationManager() {
           const timeString = scheduledDate.toLocaleTimeString();
           setMessage("");
           setStatus(
-            `⏰ Notification scheduled for ${timeString} (in ${delaySeconds} second${delaySeconds !== 1 ? 's' : ''}). It will be sent even if you close the app.`
+            `⏰ Notification scheduled for ${timeString} (in ${delaySeconds} second${delaySeconds !== 1 ? 's' : ''}).`
           );
         } else {
           setMessage("");
           setStatus("✅ Notification scheduled successfully.");
         }
       } else {
-        // Send immediately
         await sendNotification(messageToSend, subscription);
         setMessage("");
         setStatus("✅ Notification sent! Check your notifications.");
@@ -233,7 +184,7 @@ export function PushNotificationManager() {
         </div>
         {subscription ? (
           <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-100">
-            {subscription.type === 'fcm' ? 'FCM' : 'Web Push'}
+            Subscribed
           </span>
         ) : (
           <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-medium text-amber-800 dark:bg-amber-900/40 dark:text-amber-100">
@@ -273,7 +224,6 @@ export function PushNotificationManager() {
       {!subscription && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/60 dark:text-amber-100">
           Click <strong>Subscribe</strong> to enable push notifications.
-          {isIOSDevice && " (iOS uses Web Push, not FCM)"}
         </div>
       )}
 
@@ -321,4 +271,3 @@ export function PushNotificationManager() {
     </div>
   );
 }
-
