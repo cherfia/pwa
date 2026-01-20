@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { ServiceWorkerRegister } from "@/components/service-worker-register";
+import { ErrorBoundary } from "@/components/error-boundary";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -36,9 +37,11 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        {children}
-        {/* Registers the service worker for PWA installability */}
-        <ServiceWorkerRegister />
+        <ErrorBoundary>
+          {children}
+          {/* Registers the service worker for PWA installability */}
+          <ServiceWorkerRegister />
+        </ErrorBoundary>
       </body>
     </html>
   );
