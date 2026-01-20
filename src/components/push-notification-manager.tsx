@@ -26,9 +26,9 @@ export function PushNotificationManager() {
       (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
     setIsIOSDevice(iOS);
 
-    if (!("serviceWorker" in navigator)) {
+    // Check if Notification API exists (not available on iOS Safari unless installed as PWA)
+    if (!("Notification" in window) || !("serviceWorker" in navigator)) {
       setIsSupported(false);
-      setError("Service worker not supported in this browser.");
       return;
     }
 
@@ -81,6 +81,10 @@ export function PushNotificationManager() {
     setIsLoading(true);
 
     try {
+      if (!("Notification" in window)) {
+        throw new Error("Notifications not supported. On iOS, add this app to your home screen first.");
+      }
+      
       const permissionResult = await Notification.requestPermission();
       setPermission(permissionResult);
 
