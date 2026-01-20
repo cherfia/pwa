@@ -6,13 +6,26 @@ import {
   scheduleNotification,
   subscribeUser,
   unsubscribeUser,
+  type PushSubscription,
 } from "@/app/actions";
 import { getFCMToken, onForegroundMessage } from "@/lib/firebase";
+
+// Convert VAPID key from base64 to Uint8Array for Web Push
+function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuffer> {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray as Uint8Array<ArrayBuffer>;
+}
 
 export function PushNotificationManager() {
   const [isSupported, setIsSupported] = useState(false);
   const [isIOSDevice, setIsIOSDevice] = useState(false);
-  const [fcmToken, setFcmToken] = useState<string | null>(null);
+  const [subscription, setSubscription] = useState<PushSubscription | null>(null);
   const [message, setMessage] = useState("");
   const [delaySeconds, setDelaySeconds] = useState<number>(0);
   const [permission, setPermission] = useState<NotificationPermission | "default">("default");
@@ -35,30 +48,10 @@ export function PushNotificationManager() {
     setIsSupported(true);
     setPermission(Notification.permission);
 
-    const loadToken = async () => {
-      try {
-        // Check if Firebase is configured
-        if (!process.env.NEXT_PUBLIC_FIREBASE_API_KEY) {
-          console.warn("Firebase not configured, skipping token load");
-          return;
-        }
-        
-        const token = await getFCMToken();
-        if (token) {
-          setFcmToken(token);
-        }
-      } catch (error) {
-        console.warn("Failed to load FCM token:", error);
-        // Don't set error state on initial load - user might not have Firebase configured yet
-      }
-    };
-
-    void loadToken();
-
-    // Listen for foreground messages (only if Firebase is available)
+    // Listen for foreground messages (only for non-iOS with Firebase)
     let unsubscribe: (() => void) | undefined;
     try {
-      if (process.env.NEXT_PUBLIC_FIREBASE_API_KEY) {
+      if (!iOS && process.env.NEXT_PUBLIC_FIREBASE_API_KEY) {
         unsubscribe = onForegroundMessage((payload) => {
           console.log("Foreground message received:", payload);
           setStatus(`📨 Message received: ${payload.notification?.title || payload.data?.title || "New notification"}`);
@@ -74,6 +67,29 @@ export function PushNotificationManager() {
       }
     };
   }, []);
+
+  // Get Web Push subscription (for iOS)
+  const getWebPushSubscription = async (): Promise<PushSubscription> => {
+    const vapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
+    if (!vapidKey) {
+      throw new Error("VAPID key not configured. Contact the administrator.");
+    }
+
+    const registration = await navigator.serviceWorker.ready;
+    let webPushSub = await registration.pushManager.getSubscription();
+
+    if (!webPushSub) {
+      webPushSub = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(vapidKey),
+      });
+    }
+
+    return {
+      type: 'webpush',
+      subscription: webPushSub.toJSON() as PushSubscriptionJSON,
+    };
+  };
 
   const subscribe = async () => {
     setError(null);
@@ -94,15 +110,25 @@ export function PushNotificationManager() {
         return;
       }
 
-      const token = await getFCMToken();
-      
-      if (!token) {
-        throw new Error("Failed to get FCM token. Make sure Firebase is configured correctly.");
+      let sub: PushSubscription;
+
+      if (isIOSDevice) {
+        // iOS: Use standard Web Push API (FCM doesn't work on iOS)
+        sub = await getWebPushSubscription();
+      } else {
+        // Android/Desktop: Try FCM first, fallback to Web Push
+        const token = await getFCMToken();
+        if (token) {
+          sub = { type: 'fcm', token };
+        } else {
+          console.warn("FCM failed, falling back to Web Push");
+          sub = await getWebPushSubscription();
+        }
       }
 
-      setFcmToken(token);
-      await subscribeUser(token);
-      setStatus("✅ Subscribed to push notifications! You can now send test notifications.");
+      setSubscription(sub);
+      await subscribeUser(sub);
+      setStatus(`✅ Subscribed via ${sub.type === 'fcm' ? 'FCM' : 'Web Push'}! You can now send test notifications.`);
     } catch (error) {
       const err = error as Error;
       setError(`Subscription failed: ${err.message || "Unknown error"}`);
@@ -117,8 +143,15 @@ export function PushNotificationManager() {
     setStatus(null);
     setIsLoading(true);
     try {
-      // FCM tokens are managed server-side, so we just clear the local token
-      setFcmToken(null);
+      // Unsubscribe from Web Push if applicable
+      if (subscription?.type === 'webpush') {
+        const registration = await navigator.serviceWorker.ready;
+        const webPushSub = await registration.pushManager.getSubscription();
+        if (webPushSub) {
+          await webPushSub.unsubscribe();
+        }
+      }
+      setSubscription(null);
       await unsubscribeUser();
       setStatus("Unsubscribed.");
     } catch (error) {
@@ -132,7 +165,7 @@ export function PushNotificationManager() {
     setError(null);
     setStatus(null);
     
-    if (!fcmToken) {
+    if (!subscription) {
       setError("Please subscribe first by clicking the Subscribe button.");
       return;
     }
@@ -150,7 +183,7 @@ export function PushNotificationManager() {
         const result = await scheduleNotification(
           messageToSend,
           delaySeconds,
-          fcmToken
+          subscription
         );
         
         if ("scheduledFor" in result && result.scheduledFor) {
@@ -166,7 +199,7 @@ export function PushNotificationManager() {
         }
       } else {
         // Send immediately
-        await sendNotification(messageToSend, fcmToken);
+        await sendNotification(messageToSend, subscription);
         setMessage("");
         setStatus("✅ Notification sent! Check your notifications.");
       }
@@ -198,9 +231,9 @@ export function PushNotificationManager() {
             Permission: {permission}
           </p>
         </div>
-        {fcmToken ? (
+        {subscription ? (
           <span className="rounded-full bg-emerald-100 px-3 py-1 text-xs font-medium text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-100">
-            Subscribed
+            {subscription.type === 'fcm' ? 'FCM' : 'Web Push'}
           </span>
         ) : (
           <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-medium text-amber-800 dark:bg-amber-900/40 dark:text-amber-100">
@@ -237,9 +270,10 @@ export function PushNotificationManager() {
         </p>
       </div>
 
-      {!fcmToken && (
+      {!subscription && (
         <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/60 dark:text-amber-100">
-          Click <strong>Subscribe</strong> to enable push notifications. You'll need to grant permission if prompted.
+          Click <strong>Subscribe</strong> to enable push notifications.
+          {isIOSDevice && " (iOS uses Web Push, not FCM)"}
         </div>
       )}
 
@@ -247,21 +281,21 @@ export function PushNotificationManager() {
         <button
           className="rounded-lg bg-black px-4 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-white dark:text-black dark:hover:bg-zinc-200"
           onClick={subscribe}
-          disabled={!!fcmToken || isLoading}
+          disabled={!!subscription || isLoading}
         >
           {isLoading ? "Subscribing..." : "Subscribe"}
         </button>
         <button
           className="rounded-lg border border-zinc-200 px-4 py-2 text-sm font-semibold text-zinc-900 transition hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-50 dark:hover:bg-zinc-800"
           onClick={unsubscribe}
-          disabled={!fcmToken || isLoading}
+          disabled={!subscription || isLoading}
         >
           {isLoading ? "Unsubscribing..." : "Unsubscribe"}
         </button>
         <button
           className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
           onClick={send}
-          disabled={!fcmToken || isLoading || !message.trim()}
+          disabled={!subscription || isLoading || !message.trim()}
         >
           {isLoading
             ? delaySeconds > 0

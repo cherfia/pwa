@@ -1,6 +1,7 @@
 "use server";
 
 import admin from "firebase-admin";
+import webpush from "web-push";
 import { Client } from "@upstash/qstash";
 import { randomUUID } from "crypto";
 import { buildNotification } from "@/lib/notification-helpers";
@@ -9,7 +10,22 @@ const QSTASH_TOKEN = process.env.QSTASH_TOKEN;
 const QSTASH_CURRENT_SIGNING_KEY = process.env.QSTASH_CURRENT_SIGNING_KEY;
 const QSTASH_NEXT_SIGNING_KEY = process.env.QSTASH_NEXT_SIGNING_KEY;
 
-let tokenStore: string | null = null;
+// VAPID keys for Web Push (required for iOS)
+const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || "mailto:admin@example.com";
+
+// Initialize web-push with VAPID details
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+}
+
+// Type for push subscriptions (FCM token or Web Push subscription)
+export type PushSubscription =
+  | { type: "fcm"; token: string }
+  | { type: "webpush"; subscription: PushSubscriptionJSON };
+
+let subscriptionStore: PushSubscription | null = null;
 let firebaseAdminInitialized = false;
 
 // Initialize Firebase Admin
@@ -45,29 +61,81 @@ const qstashClient = QSTASH_TOKEN
     })
   : null;
 
-export async function subscribeUser(token: string) {
-  tokenStore = token;
+export async function subscribeUser(subscription: PushSubscription) {
+  subscriptionStore = subscription;
   return { success: true };
 }
 
 export async function unsubscribeUser() {
-  tokenStore = null;
+  subscriptionStore = null;
   return { success: true };
 }
 
 export async function sendNotification(
   message: string,
-  fcmToken?: string
+  subscription?: PushSubscription
+) {
+  const sub = subscription || subscriptionStore;
+
+  if (!sub) {
+    throw new Error("No subscription available. Please subscribe first.");
+  }
+
+  if (sub.type === "webpush") {
+    return sendWebPushNotification(message, sub.subscription);
+  } else {
+    return sendFCMNotification(message, sub.token);
+  }
+}
+
+// Send via Web Push (for iOS Safari PWA)
+async function sendWebPushNotification(
+  message: string,
+  subscription: PushSubscriptionJSON
 ) {
   try {
-    ensureFirebaseAdmin();
-
-    // Use provided token or fall back to stored one
-    const token = fcmToken || tokenStore;
-
-    if (!token) {
-      throw new Error("No FCM token available. Please subscribe first.");
+    if (!VAPID_PUBLIC_KEY || !VAPID_PRIVATE_KEY) {
+      throw new Error(
+        "VAPID keys not configured. Set NEXT_PUBLIC_VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY."
+      );
     }
+
+    const notification = buildNotification("PWA Demo", message);
+
+    const payload = JSON.stringify({
+      title: notification.title,
+      body: notification.body,
+      icon: notification.icon,
+      badge: notification.badge,
+      image: notification.image,
+      tag: notification.tag,
+      data: notification.data,
+    });
+
+    await webpush.sendNotification(
+      subscription as webpush.PushSubscription,
+      payload
+    );
+
+    console.log("Successfully sent Web Push notification");
+    return { success: true };
+  } catch (error: any) {
+    console.error("Web Push notification error:", error);
+
+    if (error.statusCode === 410 || error.statusCode === 404) {
+      throw new Error("Push subscription expired. Please subscribe again.");
+    }
+
+    throw new Error(
+      `Failed to send notification: ${error.message || "Unknown error"}`
+    );
+  }
+}
+
+// Send via FCM (for Android/Desktop)
+async function sendFCMNotification(message: string, token: string) {
+  try {
+    ensureFirebaseAdmin();
 
     const notification = buildNotification("PWA Demo", message);
 
@@ -123,18 +191,23 @@ export async function sendNotification(
 
     return { success: true, messageId: response };
   } catch (error: any) {
-    console.error("Send notification error:", error);
+    console.error("Send FCM notification error:", error);
 
     // Provide more specific error messages
     if (error instanceof Error || error?.code) {
       const errorCode = error.code || error.message;
-      if (errorCode?.includes("invalid-registration-token") || errorCode?.includes("registration-token-not-registered")) {
+      if (
+        errorCode?.includes("invalid-registration-token") ||
+        errorCode?.includes("registration-token-not-registered")
+      ) {
         throw new Error("FCM token expired or invalid. Please subscribe again.");
       }
       if (errorCode?.includes("unregistered")) {
         throw new Error("FCM token not registered. Please subscribe again.");
       }
-      throw new Error(`Failed to send notification: ${error.message || errorCode}`);
+      throw new Error(
+        `Failed to send notification: ${error.message || errorCode}`
+      );
     }
 
     throw new Error("Failed to send notification. Please try again.");
@@ -144,18 +217,18 @@ export async function sendNotification(
 export async function scheduleNotification(
   message: string,
   delaySeconds: number,
-  fcmToken?: string
+  subscription?: PushSubscription
 ) {
   try {
-    const token = fcmToken || tokenStore;
+    const sub = subscription || subscriptionStore;
 
-    if (!token) {
-      throw new Error("No FCM token available. Please subscribe first.");
+    if (!sub) {
+      throw new Error("No subscription available. Please subscribe first.");
     }
 
     if (delaySeconds <= 0) {
       // Send immediately
-      return await sendNotification(message, token);
+      return await sendNotification(message, sub);
     }
 
     if (!qstashClient) {
@@ -186,7 +259,7 @@ export async function scheduleNotification(
       body: {
         id: notificationId,
         message,
-        fcmToken: token,
+        subscription: sub,
       },
       delay: delaySeconds, // Delay in seconds
     });
