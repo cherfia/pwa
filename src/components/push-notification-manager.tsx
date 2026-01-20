@@ -7,11 +7,11 @@ import {
   subscribeUser,
   unsubscribeUser,
 } from "@/app/actions";
-import { isIOS } from "react-device-detect";
 import { getFCMToken, onForegroundMessage } from "@/lib/firebase";
 
 export function PushNotificationManager() {
   const [isSupported, setIsSupported] = useState(false);
+  const [isIOSDevice, setIsIOSDevice] = useState(false);
   const [fcmToken, setFcmToken] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [delaySeconds, setDelaySeconds] = useState<number>(0);
@@ -21,6 +21,11 @@ export function PushNotificationManager() {
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
+    // Detect iOS safely at runtime
+    const iOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    setIsIOSDevice(iOS);
+
     if (!("serviceWorker" in navigator)) {
       setIsSupported(false);
       setError("Service worker not supported in this browser.");
@@ -173,7 +178,7 @@ export function PushNotificationManager() {
   if (!isSupported) {
     return (
       <div className="rounded-lg border border-zinc-200 bg-white p-4 text-sm text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200">
-        {isIOS
+        {isIOSDevice
           ? 'To enable Web Push on iOS 16.4+ devices, you have to "Add to Home Screen" first (in "Share" icon menu) and then open the app from the home screen.'
           : 'Push not supported in this browser.'}
       </div>
